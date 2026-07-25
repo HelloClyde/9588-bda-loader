@@ -1,0 +1,11 @@
+9588 BDA Loader
+Copyright 2026 HelloClyde
+
+This product uses the open-source bbk9588-bda-sdk build toolchain:
+https://github.com/HelloClyde/bbk9588-bda-sdk
+
+The README header artwork was generated with GPT-Image-2 and finished with
+deterministic local typography.
+
+This repository does not contain BBK firmware, proprietary system resources,
+or commercial BDA applications.

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+BDALOAD.LOG
+BDALOAD-*.LOG
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db

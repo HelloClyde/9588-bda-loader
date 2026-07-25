@@ -1,0 +1,2 @@
+bbk9588-bda-packer @ git+https://github.com/HelloClyde/bbk9588-bda-sdk.git@f7c7a66958413f2029674c70562c19ed130c945a
+Pillow>=11.0,<13
