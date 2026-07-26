@@ -4,9 +4,15 @@
 
 ## [未发布]
 
+## [1.2.0] - 2026-07-26
+
 - 中文标题和分类改为运行时读取设备自带 `HZK_LIB.BIN`，恢复原机字形。
 - 字库缺失、损坏或内存不足时显示 MsgBox 并安全退出。
 - 移除仓库内嵌的 Noto 中文点阵字体表。
+- 启动 trampoline 改为在 GUI 初始化前预留，避免复用刚释放的固件对象。
+- 启动前先释放 Loader 资源，再提交外层返回地址。
+- trampoline 改从 KSEG1 非缓存别名执行，消除普通版与诊断版之间的
+  I-cache、时序和内存布局差异。
 
 ## [1.1.0] - 2026-07-26
 
@@ -25,6 +31,7 @@
 - 支持 9588 V3.30 的 JZ4720、JZ4730、JZ4740 三套固件布局。
 - 提供诊断构建、GitHub Actions 自动打包和 tag 自动发布。
 
-[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.1.0...HEAD
+[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HelloClyde/9588-bda-loader/releases/tag/v1.0.0

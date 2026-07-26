@@ -11,6 +11,9 @@
 
 #define MAX_APPS 96u
 #define PATH_CAPACITY 560u
+#define LAUNCH_TRAMPOLINE_PATH_OFFSET 0x60u
+#define LAUNCH_TRAMPOLINE_SIZE \
+    (LAUNCH_TRAMPOLINE_PATH_OFFSET + PATH_CAPACITY)
 #define TITLE_CAPACITY 17u
 #define GRID_COLUMNS 3u
 #define GRID_ROWS 3u
@@ -188,6 +191,11 @@ static u8 *g_screen_vx;
 static u8 *g_present_vx;
 static u8 *g_icon_slots;
 static u8 *g_system_font;
+static u8 *g_launch_trampoline;
+static volatile u32 *g_launch_saved_ra_slot;
+static u32 g_launch_cache_barrier;
+static u32 g_launch_exec_address;
+static int g_launch_handed_off;
 static u32 g_app_count;
 static u32 g_current_category;
 static u32 g_selected_ordinal;
@@ -2487,6 +2495,17 @@ static void sync_key_state(void) {
 }
 
 static int allocate_ui_buffers(void) {
+    /*
+     * Reserve executable hand-off storage before creating any GUI object.
+     * Keeping this block alive for the whole session prevents the launcher
+     * from reusing a just-freed graphics/file-system allocation.
+     */
+    g_launch_trampoline = (u8 *)bda_alloc(LAUNCH_TRAMPOLINE_SIZE);
+    if (!g_launch_trampoline
+        || (u32)g_launch_trampoline == 0xffffffffu) {
+        g_launch_trampoline = 0;
+        return 0;
+    }
     g_screen_vx = (u8 *)bda_alloc(SCREEN_VX_SIZE);
     if (!g_screen_vx || (u32)g_screen_vx == 0xffffffffu) {
         g_screen_vx = 0;
@@ -2531,6 +2550,10 @@ static void free_heap_resources(void) {
     if (g_apps) {
         bda_free(g_apps);
         g_apps = 0;
+    }
+    if (g_launch_trampoline && !g_launch_handed_off) {
+        bda_free(g_launch_trampoline);
+        g_launch_trampoline = 0;
     }
 }
 
@@ -2744,22 +2767,20 @@ static void emit_load_address(u32 *code, u32 *count, u32 reg, u32 value) {
     code[(*count)++] = mips_ori(reg, reg, value);
 }
 
-static int schedule_app_after_return(int app_index) {
+static int prepare_app_after_return(int app_index) {
     enum {
         REG_A0 = 4u,
         REG_A1 = 5u,
         REG_A2 = 6u,
         REG_T0 = 8u,
         REG_T9 = 25u,
-        REG_RA = 31u,
-        TRAMPOLINE_PATH_OFFSET = 0x60u
+        REG_RA = 31u
     };
     firmware_path_profile_t profile;
     u32 path_entry = 0;
     volatile u32 *saved_caller_ra_slot = 0;
     u32 caller_return = 0;
     u32 expected_jal;
-    u32 allocation_size;
     u8 *trampoline;
     u32 *code;
     u32 count = 0;
@@ -2831,18 +2852,19 @@ static int schedule_app_after_return(int app_index) {
         return 0;
     }
 
-    allocation_size =
-        TRAMPOLINE_PATH_OFFSET + string_length(path) + 1u;
-    trampoline = (u8 *)bda_alloc(allocation_size);
-    if (!trampoline || (u32)trampoline == 0xffffffffu) {
-        TRACE_TEXT("DEFER_ALLOC_FAILED");
+    trampoline = g_launch_trampoline;
+    if (!trampoline
+        || ((u32)trampoline & 3u)
+        || (u32)trampoline < 0x80000000u
+        || (u32)trampoline > 0x9fffffffu) {
+        TRACE_TEXT("DEFER_BUFFER_INVALID");
         TRACE_BATCH_END();
         return 0;
     }
-    bda_memset(trampoline, 0, allocation_size);
+    bda_memset(trampoline, 0, LAUNCH_TRAMPOLINE_SIZE);
     copy_string(
-        (char *)trampoline + TRAMPOLINE_PATH_OFFSET,
-        allocation_size - TRAMPOLINE_PATH_OFFSET,
+        (char *)trampoline + LAUNCH_TRAMPOLINE_PATH_OFFSET,
+        PATH_CAPACITY,
         path
     );
     code = (u32 *)trampoline;
@@ -2850,7 +2872,7 @@ static int schedule_app_after_return(int app_index) {
     /* a0=path, a1=menu frame, a2=menu state */
     emit_load_address(
         code, &count, REG_A0,
-        (u32)trampoline + TRAMPOLINE_PATH_OFFSET
+        (u32)trampoline + LAUNCH_TRAMPOLINE_PATH_OFFSET
     );
     emit_load_address(code, &count, REG_A1, g_bda_loader_entry_s3);
     emit_load_address(code, &count, REG_A2, profile.launch_context_a2);
@@ -2871,27 +2893,48 @@ static int schedule_app_after_return(int app_index) {
     code[count++] = 0x03200008u; /* jr t9 */
     code[count++] = 0x00000000u;
 
-    if (count * 4u > TRAMPOLINE_PATH_OFFSET) {
-        bda_free(trampoline);
+    if (count * 4u > LAUNCH_TRAMPOLINE_PATH_OFFSET) {
         TRACE_TEXT("DEFER_CODE_TOO_LARGE");
         TRACE_BATCH_END();
         return 0;
     }
 
     TRACE_VALUE("DEFER_TRAMPOLINE=", trampoline);
+    TRACE_VALUE(
+        "DEFER_EXEC_UNCACHED=",
+        ((u32)trampoline & 0x1fffffffu) | 0xa0000000u
+    );
     TRACE_VALUE("DEFER_CODE_WORDS=", count);
     TRACE_VALUE("DEFER_PATCH_OLD=", *saved_caller_ra_slot);
-    /*
-     * Use the barrier called by this exact path-loader. JZ4730 uses
-     * 0x80004150; JZ4720/JZ4740 use 0x80004264. The resolver decoded and
-     * validated its body before this indirect call.
-     */
-    ((void (*)(void))profile.cache_barrier)();
-    *saved_caller_ra_slot = (u32)trampoline;
-    TRACE_VALUE("DEFER_PATCH_NEW=", *saved_caller_ra_slot);
-    TRACE_TEXT("DEFER_READY_RETURN_NORMALLY");
+    TRACE_TEXT("DEFER_EXEC_MODE=KSEG1_UNCACHED");
+    TRACE_TEXT("DEFER_PREPARED");
     TRACE_BATCH_END();
+
+    g_launch_saved_ra_slot = saved_caller_ra_slot;
+    g_launch_cache_barrier = profile.cache_barrier;
+    g_launch_exec_address =
+        ((u32)trampoline & 0x1fffffffu) | 0xa0000000u;
+    g_launch_handed_off = 1;
     return 1;
+}
+
+/*
+ * This must be the final operation before bda_loader_main returns. The
+ * firmware helper writes back and invalidates D-cache. Executing the generated
+ * code through its KSEG1 alias then bypasses I-cache entirely, so diagnostic
+ * logging, code layout and stale instruction lines cannot affect the hand-off.
+ * No file, GUI or allocator call is allowed after the saved return is patched.
+ */
+static void __attribute__((noinline)) commit_prepared_launch(void) {
+    void (*cache_barrier)(void) =
+        (void (*)(void))g_launch_cache_barrier;
+    volatile u32 *saved_ra = g_launch_saved_ra_slot;
+    u32 exec_address = g_launch_exec_address;
+
+    cache_barrier();
+    __asm__ volatile("" ::: "memory");
+    *saved_ra = exec_address;
+    __asm__ volatile("sync" ::: "memory");
 }
 
 int bda_loader_main(void) {
@@ -2909,6 +2952,11 @@ int bda_loader_main(void) {
     g_screen_vx = 0;
     g_present_vx = 0;
     g_icon_slots = 0;
+    g_launch_trampoline = 0;
+    g_launch_saved_ra_slot = 0;
+    g_launch_cache_barrier = 0;
+    g_launch_exec_address = 0;
+    g_launch_handed_off = 0;
     g_system_font = 0;
     g_app_count = 0;
     g_current_category = 0;
@@ -2963,7 +3011,7 @@ int bda_loader_main(void) {
     g_diag_selected_icon_load_max_ms = 0;
 #endif
     TRACE_RESET();
-    TRACE_TEXT("BDALOAD TRACE V35");
+    TRACE_TEXT("BDALOAD TRACE V36");
     TRACE_TEXT("MAIN_INIT_DONE");
     TRACE_TEXT("FRAME_MODE=BORROW_OUTER_S3");
     TRACE_TEXT("ICON_COMPOSITOR=MANUAL_EXACT_F81F");
@@ -3160,14 +3208,19 @@ int bda_loader_main(void) {
         g_diag_selected_icon_load_max_ms
     );
     TRACE_TEXT("RAW_EVENT_LOOP_DONE");
-    release_borrowed_frame();
     if (launch_index >= 0) {
-        if (!schedule_app_after_return(launch_index)) {
+        if (!prepare_app_after_return(launch_index)) {
             TRACE_TEXT("DEFER_SCHEDULE_FAILED");
         }
     }
+    release_borrowed_frame();
     TRACE_TEXT("MAIN_FREE_HEAP");
     free_heap_resources();
+    if (g_launch_handed_off) {
+        TRACE_TEXT("DEFER_COMMIT_AND_RETURN");
+        commit_prepared_launch();
+        return 0;
+    }
     TRACE_TEXT("MAIN_RETURN");
     return 0;
 }
