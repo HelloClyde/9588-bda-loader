@@ -1734,7 +1734,7 @@ static void render_background(void) {
     screen_fill_rect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT, header);
     screen_fill_rect(0, HEADER_HEIGHT - 2, SCREEN_WIDTH, 2, accent);
     draw_header_brand(accent, violet);
-    screen_draw_small_text(213, 7, "V33", muted);
+    screen_draw_small_text(213, 7, "V34", muted);
 
     for (slot = 0; slot < APPS_PER_PAGE; ++slot) {
         u32 ordinal = page_start + slot;
@@ -2493,6 +2493,40 @@ typedef struct firmware_path_profile {
     const char *name;
 } firmware_path_profile_t;
 
+typedef struct known_firmware_path {
+    u32 path_entry;
+    u32 cache_barrier;
+    const char *name;
+} known_firmware_path_t;
+
+static const known_firmware_path_t g_known_firmware_paths[] = {
+    {0x8002e1c0u, 0x80004264u, "9588-JZ4720"},
+    {0x80021098u, 0x80004150u, "9588-JZ4730"},
+    {0x8002c5b0u, 0x80004264u, "9588-JZ4740"},
+    {0x80021678u, 0x80004150u, "9688-JZ4730"},
+    {0x8002e6b8u, 0x80004264u, "9688-JZ4740"}
+};
+
+static const char *firmware_path_name(
+    u32 path_entry,
+    u32 cache_barrier,
+    const char *compatible_name
+) {
+    u32 index;
+
+    for (index = 0;
+         index < sizeof(g_known_firmware_paths)
+            / sizeof(g_known_firmware_paths[0]);
+         ++index) {
+        if (g_known_firmware_paths[index].path_entry == path_entry
+            && g_known_firmware_paths[index].cache_barrier
+                == cache_barrier) {
+            return g_known_firmware_paths[index].name;
+        }
+    }
+    return compatible_name;
+}
+
 static u32 decode_direct_jump_target(u32 call_site, u32 instruction) {
     return ((call_site + 4u) & 0xf0000000u)
         | ((instruction & 0x03ffffffu) << 2);
@@ -2552,8 +2586,10 @@ static int resolve_firmware_path_profile(
     /*
      * The JZ4730 and JZ4740 kernels share the s0/s6 path-loader layout:
      *
-     *   JZ4730 entry=0x80021098 return=0x8002128c
-     *   JZ4740 entry=0x8002c5b0 return=0x8002c7a4
+     *   9588 JZ4730 entry=0x80021098 return=0x8002128c
+     *   9588 JZ4740 entry=0x8002c5b0 return=0x8002c7a4
+     *   9688 JZ4730 entry=0x80021678 return=0x8002186c
+     *   9688 JZ4740 entry=0x8002e6b8 return=0x8002e8ac
      *
      * JZ4720 keeps the same external ABI and 0xf0-byte stack frame, but stores
      * path in s2 and a2 in s4:
@@ -2585,9 +2621,13 @@ static int resolve_firmware_path_profile(
         profile->cache_barrier = cache_barrier;
         profile->saved_caller_ra_offset = 0xecu;
         profile->launch_context_a2 = g_bda_loader_entry_s6;
-        profile->name = cache_barrier == 0x80004150u
-            ? "JZ4730"
-            : "JZ4740";
+        profile->name = firmware_path_name(
+            entry,
+            cache_barrier,
+            cache_barrier == 0x80004150u
+                ? "JZ4730-COMPAT"
+                : "JZ4740-COMPAT"
+        );
         return 1;
     }
 
@@ -2604,7 +2644,11 @@ static int resolve_firmware_path_profile(
         profile->cache_barrier = cache_barrier;
         profile->saved_caller_ra_offset = 0xecu;
         profile->launch_context_a2 = g_bda_loader_entry_s4;
-        profile->name = "JZ4720";
+        profile->name = firmware_path_name(
+            entry,
+            cache_barrier,
+            "JZ4720-COMPAT"
+        );
         return 1;
     }
     return 0;
@@ -2842,7 +2886,7 @@ int bda_loader_main(void) {
     g_diag_selected_icon_load_max_ms = 0;
 #endif
     TRACE_RESET();
-    TRACE_TEXT("BDALOAD TRACE V33");
+    TRACE_TEXT("BDALOAD TRACE V34");
     TRACE_TEXT("MAIN_INIT_DONE");
     TRACE_TEXT("FRAME_MODE=BORROW_OUTER_S3");
     TRACE_TEXT("ICON_COMPOSITOR=MANUAL_EXACT_F81F");

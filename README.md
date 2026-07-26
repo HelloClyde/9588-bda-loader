@@ -6,12 +6,12 @@
   <a href="https://github.com/HelloClyde/9588-bda-loader/actions/workflows/build-release.yml"><img src="https://github.com/HelloClyde/9588-bda-loader/actions/workflows/build-release.yml/badge.svg" alt="构建状态"></a>
   <a href="https://github.com/HelloClyde/9588-bda-loader/releases/latest"><img src="https://img.shields.io/github/v/release/HelloClyde/9588-bda-loader?display_name=tag" alt="最新版本"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
-  <img src="https://img.shields.io/badge/BBK-9588-18e8e0" alt="BBK 9588">
+  <img src="https://img.shields.io/badge/BBK-9588%20%7C%209688-18e8e0" alt="BBK 9588 / 9688">
 </p>
 
-**9588 BDA Loader** 是一个面向步步高 BBK 9588 的原生 BDA 应用启动器。它会扫描
-设备中的 BDA，读取标题、分类和原生图标，以黑色主题九宫格展示，并通过固件自己的
-校验/加载流程启动目标应用。
+**9588 BDA Loader** 是一个面向步步高 BBK 9588/9688 的原生 BDA 应用启动器。它会
+扫描设备中的 BDA，读取标题、分类和原生图标，以黑色主题九宫格展示，并通过固件
+自己的校验/加载流程启动目标应用。
 
 项目不包含固件、系统字体、商业 BDA 或其他受版权保护的设备资源。
 
@@ -30,8 +30,8 @@
 3. 重新进入系统应用菜单，在“工具”分类中启动 **BDA Loader**。
 4. 点击九宫格应用，或使用方向键选中后按 Enter，即可启动目标 BDA。
 
-> JZ4720/JZ4740 目前完成了对应 V3.30 固件的静态机器码验证；首次真机验证建议先安装
-> `BdaLoaderDebug.bda`，退出后取回 `A:\BDALOAD.LOG`。
+> 9588 JZ4720/JZ4740 和 9688 JZ4730/JZ4740 目前完成了对应固件的静态机器码验证；
+> 首次真机验证建议先安装 `BdaLoaderDebug.bda`，退出后取回 `A:\BDALOAD.LOG`。
 
 ### 操作方式
 
@@ -54,19 +54,25 @@
 - 不使用标准窗口事件循环，采用原生 raw event + key packet 主循环，减少刷新延迟。
 - 启动扫描期间显示 Loading 状态；支持实体 Esc 退出。
 - 提供诊断版，记录扫描、header 读取、图标读取、输入和链式启动现场。
-- 支持 9588 V3.30 的 JZ4720、JZ4730、JZ4740 三套 path-loader 布局。
+- 支持 9588 V3.30 的 JZ4720/JZ4730/JZ4740，以及 9688 V2.32 的
+  JZ4730/JZ4740 path-loader 布局。
 
 ## 固件兼容性
 
-| 芯片 | V3.30 固件文件 | 状态 | 链式启动 profile |
-|---|---|---|---|
-| JZ4720 | `4720knl.bin` / `C200_4720.bin` | 静态验证通过，待更多真机反馈 | `ra-0x22c`，第三参数取 `s4` |
-| JZ4730 | `C200knl.bin` / `C200.bin` | **真机验证通过** | `ra-0x1f4`，第三参数取 `s6` |
-| JZ4740 | `kj409588.bin` / `C200.bin` | 静态验证通过，待更多真机反馈 | `ra-0x1f4`，第三参数取 `s6` |
+| 机型 / 版本 | 芯片 | 固件文件 | 状态 | 链式启动 profile |
+|---|---|---|---|---|
+| 9588 V3.30 | JZ4720 | `4720knl.bin` / `C200_4720.bin` | 静态验证通过 | `ra-0x22c`，第三参数取 `s4` |
+| 9588 V3.30 | JZ4730 | `C200knl.bin` / `C200.bin` | **真机验证通过** | `ra-0x1f4`，第三参数取 `s6` |
+| 9588 V3.30 | JZ4740 | `kj409588.bin` / `C200.bin` | 静态验证通过 | `ra-0x1f4`，第三参数取 `s6` |
+| 9688 V2.32 | JZ4730 | `C100knl.bin` / `C100.bin` | 静态验证通过 | `ra-0x1f4`，第三参数取 `s6` |
+| 9688 V2.32 | JZ4740 | `kj409688.bin` / `C100.bin` | 静态验证通过 | `ra-0x1f4`，第三参数取 `s6` |
 
 Loader 不会只凭固定地址判断固件。启动目标前会校验当前 path-loader 的 prologue、
 参数保存、`0x81c00020` 装载目标、`jalr`、返回分支和 cache barrier。未知布局会拒绝
 修改返回栈，而不是冒险跳转。
+
+入口地址、调用 ABI、包装头说明和离线验证命令见
+[固件兼容性文档](docs/firmware-compatibility.md)。
 
 ## 从源码构建
 
@@ -156,8 +162,8 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 看到类似字段：
 
 ```text
-BDALOAD TRACE V33
-FIRMWARE_PROFILE=JZ4730
+BDALOAD TRACE V34
+FIRMWARE_PROFILE=9588-JZ4730
 LAUNCH_MODE=DEFER_AFTER_RETURN
 LAUNCH_CACHE_BARRIER=...
 DEFER_READY_RETURN_NORMALLY
@@ -187,13 +193,14 @@ GitHub Actions 会在每次 push、Pull Request 和手动触发时：
 .
 ├─ .github/workflows/       CI 与 tag Release
 ├─ assets/                  启动器图标
+├─ docs/                    固件兼容性说明
 ├─ docs/images/             README 横幅和截图拼图
 ├─ docs/screenshots/        原始界面截图
 ├─ src/
 │  ├─ bda_loader.c          主程序
 │  ├─ bda_loader_debug.c    诊断构建入口
 │  └─ small_title_font.h    可直接构建的精简 GBK 字体表
-├─ tools/                   开放字体表生成工具
+├─ tools/                   开放字体表生成及固件 profile 验证工具
 ├─ build.py                 跨平台构建入口
 └─ build.ps1                Windows PowerShell 包装
 ```
