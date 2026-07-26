@@ -4,6 +4,8 @@
 
 ## [未发布]
 
+## [1.1.0] - 2026-07-26
+
 - 支持 9688 V2.32 的 JZ4730/JZ4740 path-loader 布局。
 - 固件诊断 profile 现在会区分 9588/9688 机型和芯片。
 - 新增原始内核及 64-byte 包装内核的离线只读验证工具。
@@ -19,5 +21,6 @@
 - 支持 9588 V3.30 的 JZ4720、JZ4730、JZ4740 三套固件布局。
 - 提供诊断构建、GitHub Actions 自动打包和 tag 自动发布。
 
-[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.0.0...HEAD
+[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HelloClyde/9588-bda-loader/releases/tag/v1.0.0
