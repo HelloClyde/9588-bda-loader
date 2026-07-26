@@ -38,33 +38,7 @@ def main() -> None:
         default=os.environ.get("BDA_TOOLCHAIN_PREFIX"),
         help="MIPS 工具链前缀，例如 mipsel-none-elf-",
     )
-    parser.add_argument(
-        "--font",
-        type=Path,
-        help="可选：重新生成字体表时使用的开放授权 OTF/TTF/TTC",
-    )
-    parser.add_argument(
-        "--apps",
-        type=Path,
-        help="可选：用于补充标题字符的 BDA 应用目录",
-    )
     args = parser.parse_args()
-
-    if args.apps and not args.font:
-        parser.error("--apps 只能与 --font 一起使用")
-
-    if args.font:
-        run(
-            [
-                sys.executable,
-                str(ROOT / "tools" / "generate_small_font.py"),
-                "--font",
-                str(args.font),
-                "--output",
-                str(SOURCE_DIR / "small_title_font.h"),
-            ]
-            + (["--apps", str(args.apps)] if args.apps else [])
-        )
 
     source = SOURCE_DIR / (
         "bda_loader_debug.c" if args.diagnostic else "bda_loader.c"

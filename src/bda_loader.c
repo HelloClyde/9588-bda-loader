@@ -52,6 +52,19 @@
 #define INPUT_GUARD_MAX_TICKS 12u
 #define TOUCH_KEY_GUARD_TICKS 8u
 #define PACKET_ESCAPE_HOLD_TICKS 8u
+#define SYSTEM_FONT_DATA_OFFSET 0x1a84b0u
+#define SYSTEM_FONT_GLYPH_SIZE 24u
+#define SYSTEM_FONT_GBK_GLYPH_COUNT 23940u
+#define SYSTEM_FONT_CACHE_SIZE \
+    (SYSTEM_FONT_GLYPH_SIZE * SYSTEM_FONT_GBK_GLYPH_COUNT)
+#define SYSTEM_FONT_REQUIRED_SIZE \
+    (SYSTEM_FONT_DATA_OFFSET + SYSTEM_FONT_CACHE_SIZE)
+#define SYSTEM_FONT_READ_CHUNK 0x8000u
+
+#define SYSTEM_FONT_LOAD_OK 1
+#define SYSTEM_FONT_LOAD_MISSING 0
+#define SYSTEM_FONT_LOAD_INVALID (-1)
+#define SYSTEM_FONT_LOAD_NO_MEMORY (-2)
 
 typedef struct loader_app {
     char path[PATH_CAPACITY];
@@ -146,6 +159,15 @@ static const char k_loader_title[] =
 static const char k_no_apps[] =
     "\xc3\xbb\xd3\xd0\xd5\xd2\xb5\xbd\xbf\xc9\xd3\xc3\xb5\xc4\x20"
     "\x42\x44\x41";
+static const char k_system_font_path[] =
+    "A:\\\xcf\xb5\xcd\xb3\\\xca\xfd\xbe\xdd\\HZK_LIB.BIN";
+static const char k_system_font_missing[] =
+    "\xce\xb4\xd5\xd2\xb5\xbd\xcf\xb5\xcd\xb3\xd7\xd6\xbf\xe2\xa3\xac"
+    "\xc7\xeb\xbc\xec\xb2\xe9\x20HZK_LIB.BIN";
+static const char k_system_font_invalid[] =
+    "\xcf\xb5\xcd\xb3\xd7\xd6\xbf\xe2\xb6\xc1\xc8\xa1\xca\xa7\xb0\xdc";
+static const char k_system_font_no_memory[] =
+    "\xcf\xb5\xcd\xb3\xd7\xd6\xbf\xe2\xc4\xda\xb4\xe6\xb2\xbb\xd7\xe3";
 static const char k_loading_text[] = "LOADING BDA...";
 
 static const char *const k_category_tabs[10] = {
@@ -161,17 +183,11 @@ static const char *const k_category_tabs[10] = {
     "\xb9\xa4\xbe\xdf",
 };
 
-typedef struct small_gbk_glyph {
-    u16 key;
-    u8 rows[24];
-} small_gbk_glyph_t;
-
-#include "small_title_font.h"
-
 static loader_app_t *g_apps;
 static u8 *g_screen_vx;
 static u8 *g_present_vx;
 static u8 *g_icon_slots;
+static u8 *g_system_font;
 static u32 g_app_count;
 static u32 g_current_category;
 static u32 g_selected_ordinal;
@@ -1483,25 +1499,79 @@ static int small_ascii_glyph_index(u8 character) {
     return -1;
 }
 
-static const small_gbk_glyph_t *small_gbk_glyph(u16 key) {
-    u32 left = 0;
-    u32 right = SMALL_GBK_GLYPH_COUNT;
+static int system_font_gbk_index(u16 key, u32 *out_index) {
+    u32 high = (u32)(key >> 8);
+    u32 low = (u32)(key & 0xffu);
+    u32 index;
 
-    while (left < right) {
-        u32 middle = left + (right - left) / 2u;
-        u16 candidate = k_small_gbk_glyphs[middle].key;
+    if (high < 0x81u || high > 0xfeu
+        || low < 0x40u || low > 0xfeu || low == 0x7fu) {
+        return 0;
+    }
+    index = high * 190u + low
+        - (low < 0x80u ? 0x5ffeu : 0x5fffu);
+    if (index >= SYSTEM_FONT_GBK_GLYPH_COUNT) {
+        return 0;
+    }
+    *out_index = index;
+    return 1;
+}
 
-        if (candidate < key) {
-            left = middle + 1u;
-        } else {
-            right = middle;
+static const u8 *small_gbk_glyph(u16 key) {
+    u32 index;
+
+    if (!g_system_font || !system_font_gbk_index(key, &index)) {
+        return 0;
+    }
+    return g_system_font + index * SYSTEM_FONT_GLYPH_SIZE;
+}
+
+static int load_system_font(void) {
+    int file;
+    int file_size;
+    int read_count;
+    u32 total = 0;
+    u8 *font;
+
+    file = bda_fs_fopen_raw(k_system_font_path, "rb");
+    if (!bda_fs_file_is_valid(file)) {
+        return SYSTEM_FONT_LOAD_MISSING;
+    }
+    file_size = bda_fs_seek_raw(file, 0, BDA_SEEK_END);
+    TRACE_VALUE("SYSTEM_FONT_FILE_SIZE=", file_size);
+    if (file_size < (int)SYSTEM_FONT_REQUIRED_SIZE) {
+        (void)bda_fs_close_raw(file);
+        return SYSTEM_FONT_LOAD_INVALID;
+    }
+    font = (u8 *)bda_alloc(SYSTEM_FONT_CACHE_SIZE);
+    if (!font || (u32)font == 0xffffffffu) {
+        (void)bda_fs_close_raw(file);
+        return SYSTEM_FONT_LOAD_NO_MEMORY;
+    }
+    if (bda_fs_seek_raw(
+            file, (s32)SYSTEM_FONT_DATA_OFFSET, BDA_SEEK_SET
+        ) != (int)SYSTEM_FONT_DATA_OFFSET) {
+        (void)bda_fs_close_raw(file);
+        bda_free(font);
+        return SYSTEM_FONT_LOAD_INVALID;
+    }
+    while (total < SYSTEM_FONT_CACHE_SIZE) {
+        u32 remaining = SYSTEM_FONT_CACHE_SIZE - total;
+        u32 chunk = remaining < SYSTEM_FONT_READ_CHUNK
+            ? remaining
+            : SYSTEM_FONT_READ_CHUNK;
+
+        read_count = bda_fs_read_raw(file, font + total, chunk);
+        if (read_count <= 0 || (u32)read_count > chunk) {
+            (void)bda_fs_close_raw(file);
+            bda_free(font);
+            return SYSTEM_FONT_LOAD_INVALID;
         }
+        total += (u32)read_count;
     }
-    if (left < SMALL_GBK_GLYPH_COUNT
-        && k_small_gbk_glyphs[left].key == key) {
-        return &k_small_gbk_glyphs[left];
-    }
-    return 0;
+    (void)bda_fs_close_raw(file);
+    g_system_font = font;
+    return SYSTEM_FONT_LOAD_OK;
 }
 
 static void screen_draw_small_ascii(
@@ -1543,7 +1613,7 @@ static void screen_draw_small_gbk(
     u16 key,
     u16 color
 ) {
-    const small_gbk_glyph_t *glyph = small_gbk_glyph(key);
+    const u8 *glyph = small_gbk_glyph(key);
     int row;
     int column;
 
@@ -1553,8 +1623,8 @@ static void screen_draw_small_gbk(
     }
     for (row = 0; row < 12; ++row) {
         u16 bits = (u16)(
-            ((u16)glyph->rows[row * 2] << 8)
-            | glyph->rows[row * 2 + 1]
+            ((u16)glyph[row * 2] << 8)
+            | glyph[row * 2 + 1]
         );
 
         for (column = 0; column < 12; ++column) {
@@ -1734,7 +1804,7 @@ static void render_background(void) {
     screen_fill_rect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT, header);
     screen_fill_rect(0, HEADER_HEIGHT - 2, SCREEN_WIDTH, 2, accent);
     draw_header_brand(accent, violet);
-    screen_draw_small_text(213, 7, "V34", muted);
+    screen_draw_small_text(213, 7, "V35", muted);
 
     for (slot = 0; slot < APPS_PER_PAGE; ++slot) {
         u32 ordinal = page_start + slot;
@@ -2442,6 +2512,10 @@ static int allocate_ui_buffers(void) {
 }
 
 static void free_heap_resources(void) {
+    if (g_system_font) {
+        bda_free(g_system_font);
+        g_system_font = 0;
+    }
     if (g_icon_slots) {
         bda_free(g_icon_slots);
         g_icon_slots = 0;
@@ -2824,7 +2898,9 @@ int bda_loader_main(void) {
     bda_gui_input_packet_t packet;
     int launch_index = -1;
     int call_result;
+    int font_result;
     int action = -1;
+    u32 font_start;
     u32 last_input_tick;
     u32 startup_raw_drained;
     u32 startup_raw_input;
@@ -2833,6 +2909,7 @@ int bda_loader_main(void) {
     g_screen_vx = 0;
     g_present_vx = 0;
     g_icon_slots = 0;
+    g_system_font = 0;
     g_app_count = 0;
     g_current_category = 0;
     g_selected_ordinal = 0;
@@ -2886,12 +2963,44 @@ int bda_loader_main(void) {
     g_diag_selected_icon_load_max_ms = 0;
 #endif
     TRACE_RESET();
-    TRACE_TEXT("BDALOAD TRACE V34");
+    TRACE_TEXT("BDALOAD TRACE V35");
     TRACE_TEXT("MAIN_INIT_DONE");
     TRACE_TEXT("FRAME_MODE=BORROW_OUTER_S3");
     TRACE_TEXT("ICON_COMPOSITOR=MANUAL_EXACT_F81F");
     TRACE_TEXT("ICON_CACHE_DISABLED=1");
     TRACE_TEXT("VX_BLACK_REMAP=0_TO_1");
+    TRACE_TEXT("SYSTEM_FONT=RUNTIME_HZK_LIB");
+
+    TRACE_TEXT("SYSTEM_FONT_LOAD_BEGIN");
+    font_start = bda_gui_millisecond_count();
+    font_result = load_system_font();
+    TRACE_VALUE("SYSTEM_FONT_LOAD_RESULT=", font_result);
+    TRACE_VALUE(
+        "SYSTEM_FONT_LOAD_MS=",
+        bda_gui_millisecond_elapsed(
+            font_start, bda_gui_millisecond_count()
+        )
+    );
+    TRACE_VALUE("SYSTEM_FONT_CACHE_PTR=", g_system_font);
+    TRACE_VALUE(
+        "SYSTEM_FONT_CACHE_BYTES=",
+        g_system_font ? SYSTEM_FONT_CACHE_SIZE : 0u
+    );
+    if (font_result != SYSTEM_FONT_LOAD_OK) {
+        if (font_result == SYSTEM_FONT_LOAD_MISSING) {
+            TRACE_TEXT("SYSTEM_FONT_MISSING");
+            bda_msgbox(k_loader_title, k_system_font_missing);
+        } else if (font_result == SYSTEM_FONT_LOAD_NO_MEMORY) {
+            TRACE_TEXT("SYSTEM_FONT_NO_MEMORY");
+            bda_msgbox(k_loader_title, k_system_font_no_memory);
+        } else {
+            TRACE_TEXT("SYSTEM_FONT_INVALID");
+            bda_msgbox(k_loader_title, k_system_font_invalid);
+        }
+        free_heap_resources();
+        return 6;
+    }
+    TRACE_TEXT("SYSTEM_FONT_LOAD_DONE");
 
     TRACE_TEXT("UI_ALLOC_BEGIN");
     if (!allocate_ui_buffers()) {

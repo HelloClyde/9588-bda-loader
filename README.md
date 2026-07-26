@@ -14,6 +14,8 @@
 自己的校验/加载流程启动目标应用。
 
 项目不包含固件、系统字体、商业 BDA 或其他受版权保护的设备资源。
+中文标题使用设备自带的 `A:\系统\数据\HZK_LIB.BIN`；缺少或无法读取时，Loader
+会显示提示并安全退出。
 
 ## 界面预览
 
@@ -50,6 +52,7 @@
 - 黑色主题 3×3 九宫格，每页 9 个应用，支持上下翻页。
 - 底部两行双字分类 tabs：其他、听说、语法、阅读、游戏、考试、背诵、词典、娱乐、工具。
 - 读取 BDA header 的标题、分类、54×54 普通图标和 58×58 选中图标。
+- 运行时读取设备原生 12×12 GBK 字库，保持与系统菜单一致的中文字形。
 - 支持固件 VX 资源及官方兼容 24 位 BMP 图标。
 - 不使用标准窗口事件循环，采用原生 raw event + key packet 主循环，减少刷新延迟。
 - 启动扫描期间显示 Loading 状态；支持实体 Esc 退出。
@@ -131,6 +134,15 @@ dist/BdaLoaderDebug.bda
 
 ## 关键实现
 
+### 系统字体
+
+Loader 不再内嵌第三方中文点阵。启动时会打开
+`A:\系统\数据\HZK_LIB.BIN`，校验文件长度，并将固件 GBK 12×12 字模区一次读取到
+堆缓存。页面绘制只访问内存，不会在翻页或切换分类时反复读取文件。
+
+字库不存在、长度异常、读取失败或缓存内存不足时，会通过固件 MsgBox 说明原因并
+安全返回系统菜单。字库缓存会在退出 Loader 或启动目标 BDA 前释放。
+
 ### 图标合成
 
 BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提交还会把
@@ -162,7 +174,9 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 看到类似字段：
 
 ```text
-BDALOAD TRACE V34
+BDALOAD TRACE V35
+SYSTEM_FONT=RUNTIME_HZK_LIB
+SYSTEM_FONT_LOAD_RESULT=1
 FIRMWARE_PROFILE=9588-JZ4730
 LAUNCH_MODE=DEFER_AFTER_RETURN
 LAUNCH_CACHE_BARRIER=...
@@ -198,9 +212,8 @@ GitHub Actions 会在每次 push、Pull Request 和手动触发时：
 ├─ docs/screenshots/        原始界面截图
 ├─ src/
 │  ├─ bda_loader.c          主程序
-│  ├─ bda_loader_debug.c    诊断构建入口
-│  └─ small_title_font.h    可直接构建的精简 GBK 字体表
-├─ tools/                   开放字体表生成及固件 profile 验证工具
+│  └─ bda_loader_debug.c    诊断构建入口
+├─ tools/                   固件 profile 验证工具
 ├─ build.py                 跨平台构建入口
 └─ build.ps1                Windows PowerShell 包装
 ```
@@ -215,8 +228,7 @@ GitHub Actions 会在每次 push、Pull Request 和手动触发时：
 
 ## 许可证
 
-项目代码采用 [Apache License 2.0](LICENSE)。`src/small_title_font.h` 由
-Noto Sans CJK SC 生成，遵循 [SIL Open Font License 1.1](docs/licenses/OFL-NotoSansCJK.txt)；
-详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目代码采用 [Apache License 2.0](LICENSE)，第三方构建依赖见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 README 顶部横幅底图由 **GPT-Image-2** 生成，项目标题和芯片型号使用本地确定性排版。
