@@ -160,12 +160,13 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 另一个 BDA。当前实现会：
 
 1. 校验正在执行的固件 path-loader profile；
-2. 在创建 GUI 对象前预留一段小型 MIPS trampoline；
+2. 在任何日志、字库或 GUI 分配前，首先预留一段小型 MIPS trampoline；
 3. 写入目标路径和指令后，先释放 Loader 的字体、图标与绘图资源；
-4. 用固件 D-cache barrier 写回 trampoline，并把外层返回地址改为其 KSEG1 非缓存别名；
-5. 让 Loader 正常返回并完成固件 post-BDA 收尾；
-6. 再由 trampoline 从完整入口启动目标 BDA；
-7. 目标返回后 tail-call `MEM_FREE`，释放 trampoline 并回到原菜单 continuation。
+4. 等待固定 8 个固件 tick，让普通版和诊断版具有相同的最短收尾时间；
+5. 用固件 D-cache barrier 写回 trampoline，并把外层返回地址改为其 KSEG1 非缓存别名；
+6. 让 Loader 正常返回并完成固件 post-BDA 收尾；
+7. 再由 trampoline 从完整入口启动目标 BDA；
+8. 目标返回后 tail-call `MEM_FREE`，释放 trampoline 并回到原菜单 continuation。
 
 这避免目标覆盖仍在执行的 Loader，也消除了诊断日志、堆复用和 I-cache
 状态对链式启动的影响；trampoline 会在目标返回后自行释放。
@@ -176,7 +177,8 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 看到类似字段：
 
 ```text
-BDALOAD TRACE V36
+BDALOAD TRACE V37
+LAUNCH_BUFFER_PTR=...
 SYSTEM_FONT=RUNTIME_HZK_LIB
 SYSTEM_FONT_LOAD_RESULT=1
 FIRMWARE_PROFILE=9588-JZ4730
@@ -184,6 +186,7 @@ LAUNCH_MODE=DEFER_AFTER_RETURN
 LAUNCH_CACHE_BARRIER=...
 DEFER_EXEC_MODE=KSEG1_UNCACHED
 DEFER_PREPARED
+DEFER_SETTLE_TICKS=8
 DEFER_COMMIT_AND_RETURN
 ```
 

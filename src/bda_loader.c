@@ -14,6 +14,7 @@
 #define LAUNCH_TRAMPOLINE_PATH_OFFSET 0x60u
 #define LAUNCH_TRAMPOLINE_SIZE \
     (LAUNCH_TRAMPOLINE_PATH_OFFSET + PATH_CAPACITY)
+#define LAUNCH_SETTLE_TICKS 8u
 #define TITLE_CAPACITY 17u
 #define GRID_COLUMNS 3u
 #define GRID_ROWS 3u
@@ -2494,11 +2495,11 @@ static void sync_key_state(void) {
     g_previous_keys = key_mask(&packet);
 }
 
-static int allocate_ui_buffers(void) {
+static int reserve_launch_trampoline(void) {
     /*
-     * Reserve executable hand-off storage before creating any GUI object.
-     * Keeping this block alive for the whole session prevents the launcher
-     * from reusing a just-freed graphics/file-system allocation.
+     * This must be the first allocator operation in bda_loader_main. In
+     * particular, diagnostic logging and system-font loading must happen
+     * later so Debug and Release observe the same firmware heap state.
      */
     g_launch_trampoline = (u8 *)bda_alloc(LAUNCH_TRAMPOLINE_SIZE);
     if (!g_launch_trampoline
@@ -2506,6 +2507,10 @@ static int allocate_ui_buffers(void) {
         g_launch_trampoline = 0;
         return 0;
     }
+    return 1;
+}
+
+static int allocate_ui_buffers(void) {
     g_screen_vx = (u8 *)bda_alloc(SCREEN_VX_SIZE);
     if (!g_screen_vx || (u32)g_screen_vx == 0xffffffffu) {
         g_screen_vx = 0;
@@ -2937,6 +2942,22 @@ static void __attribute__((noinline)) commit_prepared_launch(void) {
     __asm__ volatile("sync" ::: "memory");
 }
 
+static void wait_for_launch_settle(void) {
+    u32 start = bda_gui_tick_count_25ms();
+
+    /*
+     * Diagnostic file writes used to provide this delay accidentally. Give
+     * both builds the same minimum 200 ms after graphics/heap teardown so the
+     * outer firmware frame can finish deferred display work before hand-off.
+     */
+    while (bda_gui_tick_elapsed_25ms(
+            start,
+            bda_gui_tick_count_25ms()
+        ) < LAUNCH_SETTLE_TICKS) {
+        bda_sys_delay(1u);
+    }
+}
+
 int bda_loader_main(void) {
     bda_gui_input_packet_t packet;
     int launch_index = -1;
@@ -2985,6 +3006,10 @@ int bda_loader_main(void) {
     g_input_startup_guard_ticks = INPUT_GUARD_MAX_TICKS;
     g_loading = 1;
     g_launch_path[0] = 0;
+    if (!reserve_launch_trampoline()) {
+        bda_msgbox(k_loader_title, "OUT OF MEMORY");
+        return 7;
+    }
 #ifdef BDA_LOADER_DIAGNOSTIC
     g_trace_batch_file = 0;
     g_trace_present_count = 0;
@@ -3011,8 +3036,9 @@ int bda_loader_main(void) {
     g_diag_selected_icon_load_max_ms = 0;
 #endif
     TRACE_RESET();
-    TRACE_TEXT("BDALOAD TRACE V36");
+    TRACE_TEXT("BDALOAD TRACE V37");
     TRACE_TEXT("MAIN_INIT_DONE");
+    TRACE_VALUE("LAUNCH_BUFFER_PTR=", g_launch_trampoline);
     TRACE_TEXT("FRAME_MODE=BORROW_OUTER_S3");
     TRACE_TEXT("ICON_COMPOSITOR=MANUAL_EXACT_F81F");
     TRACE_TEXT("ICON_CACHE_DISABLED=1");
@@ -3217,7 +3243,9 @@ int bda_loader_main(void) {
     TRACE_TEXT("MAIN_FREE_HEAP");
     free_heap_resources();
     if (g_launch_handed_off) {
+        TRACE_VALUE("DEFER_SETTLE_TICKS=", LAUNCH_SETTLE_TICKS);
         TRACE_TEXT("DEFER_COMMIT_AND_RETURN");
+        wait_for_launch_settle();
         commit_prepared_launch();
         return 0;
     }

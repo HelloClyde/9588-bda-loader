@@ -4,6 +4,13 @@
 
 ## [未发布]
 
+## [1.2.1] - 2026-07-28
+
+- trampoline 改为 Loader 的第一次堆分配，诊断日志和系统字库不再改变其
+  分配顺序。
+- 普通版和诊断版在释放图形及堆资源后统一等待 8 个固件 tick，再提交
+  外层返回地址，避免日志文件操作偶然掩盖固件收尾时序。
+
 ## [1.2.0] - 2026-07-26
 
 - 中文标题和分类改为运行时读取设备自带 `HZK_LIB.BIN`，恢复原机字形。
@@ -31,7 +38,8 @@
 - 支持 9588 V3.30 的 JZ4720、JZ4730、JZ4740 三套固件布局。
 - 提供诊断构建、GitHub Actions 自动打包和 tag 自动发布。
 
-[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.0...HEAD
+[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HelloClyde/9588-bda-loader/releases/tag/v1.0.0
