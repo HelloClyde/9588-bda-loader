@@ -26,12 +26,22 @@
 #define PATH_CAPACITY 560u
 #define FIRMWARE_CALLER_FRAME_SIZE 0x160u
 #define FIRMWARE_CALLER_PATH_OFFSET 0x20u
-#define FIRMWARE_CALLER_STUB_OFFSET 0x110u
+#define FIRMWARE_CALLER_PATH_LIMIT 0x110u
 #define FIRMWARE_CALLER_PATH_CAPACITY \
-    (FIRMWARE_CALLER_STUB_OFFSET - FIRMWARE_CALLER_PATH_OFFSET)
-#define LAUNCH_TAIL_STUB_SIZE \
-    (FIRMWARE_CALLER_FRAME_SIZE - FIRMWARE_CALLER_STUB_OFFSET - 0x18u)
-#define LAUNCH_SETTLE_TICKS 8u
+    (FIRMWARE_CALLER_PATH_LIMIT - FIRMWARE_CALLER_PATH_OFFSET)
+#define FIRMWARE_CALLER_S0_OFFSET 0x148u
+#define FIRMWARE_CALLER_S1_OFFSET 0x14cu
+#define FIRMWARE_CALLER_S2_OFFSET 0x150u
+#define FIRMWARE_CALLER_S3_OFFSET 0x154u
+#define FIRMWARE_CALLER_S4_OFFSET 0x158u
+#define FIRMWARE_CALLER_RA_OFFSET 0x15cu
+/*
+ * Every supported path-loader restarts the outer GUI timer with a literal
+ * 0x190 (400 ms) delay after a BDA returns. Starting the next BDA during that
+ * window cancels the timer before its resume event is delivered. Wait 600 ms
+ * so the firmware can complete one full timer cycle before the next launch.
+ */
+#define LAUNCH_SETTLE_TICKS 24u
 #define TITLE_CAPACITY 17u
 #define GRID_COLUMNS 3u
 #define GRID_ROWS 3u
@@ -105,17 +115,17 @@ typedef struct loader_app {
  * keeps the menu handle alive across a long-running chained application.
  *
  * A BDA cannot synchronously re-enter the path loader while it still occupies
- * the fixed 0x81c00020 image. Instead, the loader patches the outer firmware
- * path-loader frame's saved caller return address to a small tail stub in the
- * firmware caller's own stack frame and returns normally. Only after the outer
- * loader has completed all of its post-BDA cleanup does the stub tail-enter
- * the firmware path loader again with the new path and the original menu
- * context. The target may then safely overwrite this image. The second path
- * loader returns directly to the original menu call site.
+ * the fixed 0x81c00020 image. Instead, the loader patches the saved return of
+ * the complete 0x160-byte firmware menu caller, not the inner path-loader
+ * return. The first path-loader and its menu caller therefore finish their
+ * own timer, trace, heap and stack cleanup before control reaches the static
+ * no-return handoff below.
  *
- * The stub and target path occupy unused ranges already present in the
- * firmware caller's 0x160-byte frame. No Loader heap allocation survives the
- * hand-off, which is important for heap-executing dynarec applications.
+ * The handoff recreates the official caller frame, copies the selected path,
+ * waits for the firmware resume timer, and enters the original firmware
+ * caller tail. That tail performs the stock prelaunch calls, invokes the
+ * path-loader, performs the stock postlaunch calls, restores the parent
+ * registers and returns normally. No Loader heap allocation survives.
  */
 volatile u32 g_bda_loader_entry_sp __attribute__((used));
 volatile u32 g_bda_loader_entry_ra __attribute__((used));
@@ -129,8 +139,14 @@ volatile u32 g_bda_loader_entry_s5 __attribute__((used));
 volatile u32 g_bda_loader_entry_s6 __attribute__((used));
 volatile u32 g_bda_loader_entry_s7 __attribute__((used));
 volatile u32 g_bda_loader_entry_fp __attribute__((used));
+volatile u32 g_launch_parent_ra __attribute__((used));
+volatile u32 g_launch_caller_prelaunch __attribute__((used));
+volatile u32 g_launch_context_a1 __attribute__((used));
+volatile u32 g_launch_context_a2 __attribute__((used));
 
 int bda_loader_main(void);
+void launch_after_caller_return(void);
+static void launch_post_cleanup_gate(const char *path);
 
 __asm__(
     ".section .text.bda_main,\"ax\"\n"
@@ -167,6 +183,54 @@ __asm__(
     "jr $t9\n"
     "nop\n"
     ".size bda_main,.-bda_main\n"
+    ".set reorder\n"
+);
+
+/*
+ * Entered only after the first firmware menu caller has executed its complete
+ * post-BDA path and popped its original 0x160-byte frame. Recreate that exact
+ * frame for the selected target, then jump into the stock caller at its
+ * prelaunch tail. The target overwrites this Loader image, so this function
+ * must never be on the return path.
+ */
+__asm__(
+    ".section .text.bda_handoff,\"ax\"\n"
+    ".set noreorder\n"
+    ".globl launch_after_caller_return\n"
+    ".type launch_after_caller_return,@function\n"
+    "launch_after_caller_return:\n"
+    "addiu $sp,$sp,-0x160\n"
+    "sw $s0,0x148($sp)\n"
+    "sw $s1,0x14c($sp)\n"
+    "sw $s2,0x150($sp)\n"
+    "sw $s3,0x154($sp)\n"
+    "sw $s4,0x158($sp)\n"
+    "lui $t0,%hi(g_launch_parent_ra)\n"
+    "lw $t0,%lo(g_launch_parent_ra)($t0)\n"
+    "sw $t0,0x15c($sp)\n"
+    "lui $t0,%hi(g_launch_path)\n"
+    "addiu $t0,$t0,%lo(g_launch_path)\n"
+    "addiu $t1,$sp,0x20\n"
+    "1:\n"
+    "lbu $t2,0($t0)\n"
+    "sb $t2,0($t1)\n"
+    "addiu $t0,$t0,1\n"
+    "addiu $t1,$t1,1\n"
+    "bnez $t2,1b\n"
+    "nop\n"
+    "lui $t0,%hi(g_launch_context_a1)\n"
+    "lw $s3,%lo(g_launch_context_a1)($t0)\n"
+    "lui $t0,%hi(g_launch_context_a2)\n"
+    "lw $s4,%lo(g_launch_context_a2)($t0)\n"
+    "lui $t9,%hi(launch_post_cleanup_gate)\n"
+    "addiu $t9,$t9,%lo(launch_post_cleanup_gate)\n"
+    "jalr $t9\n"
+    "addiu $a0,$sp,0x20\n"
+    "lui $t0,%hi(g_launch_caller_prelaunch)\n"
+    "lw $t9,%lo(g_launch_caller_prelaunch)($t0)\n"
+    "jr $t9\n"
+    "nop\n"
+    ".size launch_after_caller_return,.-launch_after_caller_return\n"
     ".set reorder\n"
 );
 
@@ -211,9 +275,6 @@ static u8 *g_system_font;
 static volatile u32 *g_launch_saved_ra_slot;
 static u32 g_launch_cache_barrier;
 static u32 g_launch_exec_address;
-static u32 g_launch_pre_path_helper;
-static u32 g_launch_pre_trace_helper;
-static const char *g_launch_pre_trace_text;
 static int g_launch_handed_off;
 static u32 g_app_count;
 static u32 g_current_category;
@@ -251,7 +312,6 @@ static const char *g_trace_path;
 static int g_trace_batch_file;
 static volatile u32 g_trace_output_enabled =
     BDA_LOADER_TRACE_OUTPUT_DEFAULT;
-static volatile u32 g_trace_io_override;
 static char g_trace_line[128];
 static u32 g_trace_present_count;
 static u32 g_trace_window_count;
@@ -357,7 +417,7 @@ static char *append_u32(char *out, char *end, u32 value) {
 static int trace_open(const char *mode) {
     int file;
 
-    if (g_trace_output_enabled != 2u && !g_trace_io_override) {
+    if (g_trace_output_enabled != 2u) {
         return 0;
     }
     if (g_trace_path) {
@@ -378,15 +438,6 @@ static int trace_open(const char *mode) {
 static void trace_reset(void) {
     int file;
 
-    /*
-     * Release performs the same lightweight create/truncate/close boundary as
-     * Debug, but suppresses all ordinary diagnostic lines. Together with the
-     * single post-cleanup marker below, this preserves the firmware FS state
-     * required by PSX without making UI rendering log-bound.
-     */
-    if (g_trace_output_enabled == 1u) {
-        g_trace_io_override = 1u;
-    }
     if (bda_fs_file_is_valid(g_trace_batch_file)) {
         (void)bda_fs_close_raw(g_trace_batch_file);
     }
@@ -396,7 +447,6 @@ static void trace_reset(void) {
     if (bda_fs_file_is_valid(file)) {
         (void)bda_fs_close_raw(file);
     }
-    g_trace_io_override = 0u;
 }
 
 static void trace_write_line(char *out) {
@@ -511,31 +561,23 @@ static void diag_finish_header(const char *path, u32 start, int valid) {
 #endif
 
 /*
- * This runs from the firmware caller's stack stub, after the first firmware
- * path loader has restored its frame/global state but before the selected BDA
- * is loaded. The stock menu performs two calls immediately before every
- * path-loader invocation: a path/runtime preparation helper and the firmware
- * trace helper. Replaying them here makes the deferred launch follow the same
- * state transition as a direct menu launch.
+ * This runs after the first path-loader and complete menu caller have both
+ * returned. The handoff enters the original firmware caller tail after this
+ * wait, so the stock heap trace, firmware trace, path-loader and postlaunch
+ * epilogue execute in firmware rather than being replayed piecemeal here.
  */
-static void __attribute__((noinline)) launch_post_cleanup_gate(
+static void __attribute__((used, noinline)) launch_post_cleanup_gate(
     const char *path
 ) {
-    void (*pre_path_helper)(const char *);
-    void (*pre_trace_helper)(const char *);
     u32 start;
 
+    (void)path;
 #ifdef BDA_LOADER_DIAGNOSTIC
     /*
-     * Keep diagnostic file I/O before the common settle interval and the two
-     * stock firmware helpers. There must be no diagnostic-only operation
-     * between the native prelaunch sequence and the path-loader tail call.
+     * Keep the final diagnostic marker before the common settle interval.
+     * Release performs no file I/O at all.
      */
-    if (g_trace_output_enabled == 1u) {
-        g_trace_io_override = 1u;
-    }
-    trace_text("DEFER_TAIL_STUB_ENTER");
-    g_trace_io_override = 0u;
+    trace_text("DEFER_AFTER_CALLER_ENTER");
 #endif
     start = bda_gui_tick_count_25ms();
     while (bda_gui_tick_elapsed_25ms(
@@ -545,12 +587,6 @@ static void __attribute__((noinline)) launch_post_cleanup_gate(
         bda_sys_delay(1u);
     }
 
-    pre_path_helper =
-        (void (*)(const char *))g_launch_pre_path_helper;
-    pre_trace_helper =
-        (void (*)(const char *))g_launch_pre_trace_helper;
-    pre_path_helper(path);
-    pre_trace_helper(g_launch_pre_trace_text);
 }
 
 static const char *path_basename(const char *path) {
@@ -1890,7 +1926,7 @@ static void render_background(void) {
     screen_fill_rect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT, header);
     screen_fill_rect(0, HEADER_HEIGHT - 2, SCREEN_WIDTH, 2, accent);
     draw_header_brand(accent, violet);
-    screen_draw_small_text(213, 7, "V44", muted);
+    screen_draw_small_text(213, 7, "V47", muted);
 
     for (slot = 0; slot < APPS_PER_PAGE; ++slot) {
         u32 ordinal = page_start + slot;
@@ -2814,22 +2850,6 @@ static int resolve_firmware_path_profile(
     return 0;
 }
 
-static u32 mips_lui(u32 reg, u32 value) {
-    return 0x3c000000u | (reg << 16) | ((value >> 16) & 0xffffu);
-}
-
-static u32 mips_ori(u32 target, u32 source, u32 value) {
-    return 0x34000000u
-        | (source << 21)
-        | (target << 16)
-        | (value & 0xffffu);
-}
-
-static void emit_load_address(u32 *code, u32 *count, u32 reg, u32 value) {
-    code[(*count)++] = mips_lui(reg, value);
-    code[(*count)++] = mips_ori(reg, reg, value);
-}
-
 static u32 mips_direct_call_target(
     u32 instruction_address,
     u32 instruction
@@ -2861,22 +2881,19 @@ static int firmware_data_address_valid(u32 address) {
 }
 
 static int prepare_app_after_return(int app_index) {
-    enum {
-        REG_T9 = 25u,
-        REG_RA = 31u
-    };
     firmware_path_profile_t profile;
     u32 path_entry = 0;
-    volatile u32 *saved_caller_ra_slot = 0;
+    volatile u32 *pathloader_saved_ra_slot = 0;
+    volatile u32 *menu_saved_ra_slot = 0;
     u32 caller_return = 0;
-    u32 caller_stack;
-    char *caller_path;
+    u32 parent_return = 0;
+    u32 caller_stack = 0;
+    u32 caller_entry = 0;
+    u32 caller_epilogue = 0;
     u32 expected_jal;
     u32 pre_path_helper = 0;
     u32 pre_trace_helper = 0;
     u32 pre_trace_text = 0;
-    u32 *code;
-    u32 count = 0;
     const char *path;
 
     copy_string(
@@ -2887,10 +2904,16 @@ static int prepare_app_after_return(int app_index) {
     path = g_launch_path;
     if (resolve_firmware_path_profile(&profile)) {
         path_entry = profile.path_entry;
-        saved_caller_ra_slot = (volatile u32 *)(
+        pathloader_saved_ra_slot = (volatile u32 *)(
             g_bda_loader_entry_sp + profile.saved_caller_ra_offset
         );
-        caller_return = *saved_caller_ra_slot;
+        caller_return = *pathloader_saved_ra_slot;
+        caller_stack = g_bda_loader_entry_sp + 0xf0u;
+        menu_saved_ra_slot = (volatile u32 *)(
+            caller_stack + FIRMWARE_CALLER_RA_OFFSET
+        );
+        parent_return = *menu_saved_ra_slot;
+        caller_entry = caller_return - 0x220u;
     }
     expected_jal = 0x0c000000u
         | ((path_entry >> 2) & 0x03ffffffu);
@@ -2907,8 +2930,11 @@ static int prepare_app_after_return(int app_index) {
         "LAUNCH_CACHE_BARRIER=",
         path_entry ? profile.cache_barrier : 0u
     );
-    TRACE_VALUE("OUTER_CALLER_RA_SLOT=", saved_caller_ra_slot);
-    TRACE_VALUE("OUTER_CALLER_RA=", caller_return);
+    TRACE_VALUE("PATHLOADER_RA_SLOT=", pathloader_saved_ra_slot);
+    TRACE_VALUE("PATHLOADER_RA=", caller_return);
+    TRACE_VALUE("MENU_CALLER_STACK=", caller_stack);
+    TRACE_VALUE("MENU_PARENT_RA_SLOT=", menu_saved_ra_slot);
+    TRACE_VALUE("MENU_PARENT_RA=", parent_return);
     TRACE_VALUE(
         "OUTER_CALL_WORD=",
         caller_return >= 8u
@@ -2937,6 +2963,7 @@ static int prepare_app_after_return(int app_index) {
         path_entry ? profile.launch_context_a2 : 0u
     );
     if (!path_entry
+        || !firmware_code_address_valid(parent_return)
         || caller_return < 0x80004220u
         || caller_return >= 0x80500000u
         || (*(volatile u32 *)(caller_return - 0x24u)
@@ -2953,8 +2980,39 @@ static int prepare_app_after_return(int app_index) {
         || *(volatile u32 *)(caller_return - 0x0cu) != 0x02803021u
         || *(volatile u32 *)(caller_return - 0x04u) != 0x27a40020u
         || *(volatile u32 *)(caller_return + 0x10u) != 0x27a40020u
-        || *(volatile u32 *)(caller_return - 0x220u) != 0x27bdfea0u) {
+        || *(volatile u32 *)(caller_entry + 0x00u) != 0x27bdfea0u
+        || *(volatile u32 *)(caller_entry + 0x04u) != 0xafb40158u
+        || *(volatile u32 *)(caller_entry + 0x1cu) != 0xafb30154u
+        || *(volatile u32 *)(caller_entry + 0x20u) != 0xafb20150u
+        || *(volatile u32 *)(caller_entry + 0x24u) != 0xafb1014cu
+        || *(volatile u32 *)(caller_entry + 0x28u) != 0xafb00148u
+        || *(volatile u32 *)(caller_entry + 0x2cu) != 0xafbf015cu
+        || *(volatile u32 *)(caller_entry + 0x58u) != 0x8fbf015cu
+        || *(volatile u32 *)(caller_entry + 0x5cu) != 0x8fb40158u
+        || *(volatile u32 *)(caller_entry + 0x60u) != 0x8fb30154u
+        || *(volatile u32 *)(caller_entry + 0x64u) != 0x8fb20150u
+        || *(volatile u32 *)(caller_entry + 0x68u) != 0x8fb1014cu
+        || *(volatile u32 *)(caller_entry + 0x6cu) != 0x8fb00148u
+        || *(volatile u32 *)(caller_entry + 0x70u) != 0x03e00008u
+        || *(volatile u32 *)(caller_entry + 0x74u) != 0x27bd0160u
+        || (*(volatile u32 *)(caller_return + 0x04u)
+            & 0xfc000000u) != 0x0c000000u
+        || (*(volatile u32 *)(caller_return + 0x0cu)
+            & 0xfc000000u) != 0x0c000000u
+        || *(volatile u32 *)(caller_return + 0x10u) != 0x27a40020u
+        || (*(volatile u32 *)(caller_return + 0x14u)
+            & 0xfc000000u) != 0x08000000u
+        || *(volatile u32 *)(caller_return + 0x18u) != 0x8fbf015cu) {
         TRACE_TEXT("DEFER_CALLSITE_INVALID");
+        TRACE_BATCH_END();
+        return 0;
+    }
+    caller_epilogue = mips_direct_call_target(
+        caller_return + 0x14u,
+        *(volatile u32 *)(caller_return + 0x14u)
+    );
+    if (caller_epilogue != caller_entry + 0x5cu) {
+        TRACE_TEXT("DEFER_CALLER_EPILOGUE_INVALID");
         TRACE_BATCH_END();
         return 0;
     }
@@ -2974,9 +3032,15 @@ static int prepare_app_after_return(int app_index) {
     TRACE_VALUE("LAUNCH_PRE_PATH_HELPER=", pre_path_helper);
     TRACE_VALUE("LAUNCH_PRE_TRACE_HELPER=", pre_trace_helper);
     TRACE_VALUE("LAUNCH_PRE_TRACE_TEXT=", pre_trace_text);
+    TRACE_VALUE("LAUNCH_CALLER_PRE_ENTRY=", caller_return - 0x24u);
+    TRACE_VALUE("LAUNCH_CALLER_EPILOGUE=", caller_epilogue);
     if (!firmware_code_address_valid(pre_path_helper)
         || !firmware_code_address_valid(pre_trace_helper)
-        || !firmware_data_address_valid(pre_trace_text)) {
+        || !firmware_data_address_valid(pre_trace_text)
+        || mips_direct_call_target(
+            caller_return + 0x0cu,
+            *(volatile u32 *)(caller_return + 0x0cu)
+        ) != pre_path_helper) {
         TRACE_TEXT("DEFER_PRELAUNCH_INVALID");
         TRACE_BATCH_END();
         return 0;
@@ -2989,83 +3053,45 @@ static int prepare_app_after_return(int app_index) {
     }
 
     /*
-     * At BDA entry, sp belongs to the 0xf0-byte firmware path-loader frame.
-     * Its caller's 0x160-byte application-launch frame is immediately above
-     * it. All supported firmware images build the path at caller sp+0x20,
-     * reserve the range through +0x147 for locals, and save registers from
-     * +0x148. The selected path is capped before +0x110; the final 56-byte
-     * local range holds the one-shot tail stub and its post-cleanup gate call.
+     * Patch the menu caller's saved parent return, not the path-loader's saved
+     * return. The first path-loader therefore resumes at caller_return and the
+     * first caller executes its own post-trace, heap check and full epilogue.
+     * Only after that epilogue pops the original frame does the static handoff
+     * recreate a fresh caller frame for the selected target.
      */
-    caller_stack = g_bda_loader_entry_sp + 0xf0u;
-    caller_path = (char *)(caller_stack + FIRMWARE_CALLER_PATH_OFFSET);
-    code = (u32 *)(caller_stack + FIRMWARE_CALLER_STUB_OFFSET);
-    copy_string(
-        caller_path,
-        FIRMWARE_CALLER_PATH_CAPACITY,
-        path
-    );
-    bda_memset(code, 0, LAUNCH_TAIL_STUB_SIZE);
-
-    /*
-     * Run the post-cleanup gate after the original path loader has unwound.
-     * The gate waits, then replays the two stock firmware prelaunch helpers.
-     * After it returns, recreate the final firmware call site exactly:
-     *   a0=caller sp+0x20, a1=s3, a2=s4, ra=menu continuation.
-     * Tail-entering path_entry means there is only one live path-loader frame
-     * and nothing from Loader remains allocated while the target runs.
-     */
-    emit_load_address(
-        code,
-        &count,
-        REG_T9,
-        (u32)(void *)launch_post_cleanup_gate
-    );
-    code[count++] = 0x0320f809u; /* jalr t9 */
-    code[count++] = 0x27a40020u; /* delay slot: gate(path=sp+0x20) */
-    code[count++] = 0x27a40020u; /* addiu a0,sp,0x20 */
-    code[count++] = 0x02602821u; /* addu a1,s3,zero */
-    code[count++] = 0x02803021u; /* addu a2,s4,zero */
-    emit_load_address(code, &count, REG_T9, path_entry);
-    emit_load_address(code, &count, REG_RA, caller_return);
-    code[count++] = 0x03200008u; /* jr t9: tail-call path loader */
-    code[count++] = 0x00000000u;
-
-    if (count * 4u > LAUNCH_TAIL_STUB_SIZE) {
-        TRACE_TEXT("DEFER_CODE_TOO_LARGE");
-        TRACE_BATCH_END();
-        return 0;
-    }
-
-    TRACE_VALUE("DEFER_CALLER_STACK=", caller_stack);
-    TRACE_VALUE("DEFER_CALLER_PATH=", caller_path);
-    TRACE_VALUE("DEFER_TAIL_STUB=", code);
+    TRACE_TEXT("DEFER_PATCH_LEVEL=MENU_CALLER_RETURN");
+    TRACE_TEXT("DEFER_FIRST_CALLER_COMPLETES=1");
+    TRACE_VALUE("DEFER_HANDOFF=", launch_after_caller_return);
     TRACE_VALUE(
         "DEFER_EXEC_UNCACHED=",
-        ((u32)code & 0x1fffffffu) | 0xa0000000u
+        ((u32)(void *)launch_after_caller_return & 0x1fffffffu)
+            | 0xa0000000u
     );
-    TRACE_VALUE("DEFER_CODE_WORDS=", count);
-    TRACE_VALUE("DEFER_PATCH_OLD=", *saved_caller_ra_slot);
+    TRACE_VALUE("DEFER_PATCH_OLD=", *menu_saved_ra_slot);
     TRACE_TEXT("DEFER_HEAP_RETAINED=0");
     TRACE_TEXT("DEFER_EXEC_MODE=KSEG1_UNCACHED");
     TRACE_TEXT("DEFER_PREPARED");
     TRACE_BATCH_END();
 
-    g_launch_saved_ra_slot = saved_caller_ra_slot;
+    g_launch_saved_ra_slot = menu_saved_ra_slot;
     g_launch_cache_barrier = profile.cache_barrier;
     g_launch_exec_address =
-        ((u32)code & 0x1fffffffu) | 0xa0000000u;
-    g_launch_pre_path_helper = pre_path_helper;
-    g_launch_pre_trace_helper = pre_trace_helper;
-    g_launch_pre_trace_text = (const char *)pre_trace_text;
+        ((u32)(void *)launch_after_caller_return & 0x1fffffffu)
+            | 0xa0000000u;
+    g_launch_parent_ra = parent_return;
+    g_launch_caller_prelaunch = caller_return - 0x24u;
+    g_launch_context_a1 = g_bda_loader_entry_s3;
+    g_launch_context_a2 = profile.launch_context_a2;
     g_launch_handed_off = 1;
     return 1;
 }
 
 /*
  * This must be the final operation before bda_loader_main returns. The
- * firmware helper writes back and invalidates D-cache. Executing the generated
- * code through its KSEG1 alias then bypasses I-cache entirely, so diagnostic
- * logging, code layout and stale instruction lines cannot affect the hand-off.
+ * firmware helper writes back and invalidates D-cache. Executing the static
+ * no-return handoff through its KSEG1 alias then bypasses I-cache entirely, so
+ * diagnostic logging, code layout and stale instruction lines cannot affect
+ * the hand-off.
  * No file, GUI or allocator call is allowed after the saved return is patched.
  */
 static void __attribute__((noinline)) commit_prepared_launch(void) {
@@ -3098,11 +3124,11 @@ int bda_loader_main(void) {
     g_launch_saved_ra_slot = 0;
     g_launch_cache_barrier = 0;
     g_launch_exec_address = 0;
-    g_launch_pre_path_helper = 0;
-    g_launch_pre_trace_helper = 0;
-    g_launch_pre_trace_text = 0;
+    g_launch_parent_ra = 0;
+    g_launch_caller_prelaunch = 0;
+    g_launch_context_a1 = 0;
+    g_launch_context_a2 = 0;
     g_launch_handed_off = 0;
-    g_trace_io_override = 0u;
     g_system_font = 0;
     g_app_count = 0;
     g_current_category = 0;
@@ -3157,11 +3183,12 @@ int bda_loader_main(void) {
     g_diag_selected_icon_load_max_ms = 0;
 #endif
     TRACE_RESET();
-    TRACE_TEXT("BDALOAD TRACE V44");
+    TRACE_TEXT("BDALOAD TRACE V47");
     TRACE_TEXT("MAIN_INIT_DONE");
     TRACE_VALUE("TRACE_OUTPUT=", g_trace_output_enabled);
-    TRACE_TEXT("LAUNCH_STUB=FIRMWARE_CALLER_STACK_TAIL");
-    TRACE_TEXT("LAUNCH_GATE=FIRMWARE_PRELAUNCH_REPLAY");
+    TRACE_TEXT("LAUNCH_STUB=AFTER_COMPLETE_MENU_CALLER");
+    TRACE_TEXT("LAUNCH_GATE=FIRMWARE_CALLER_TAIL_REENTRY");
+    TRACE_TEXT("LAUNCH_SETTLE=FIRMWARE_TIMER_400MS_PLUS_MARGIN");
     TRACE_TEXT("FRAME_MODE=BORROW_OUTER_S3");
     TRACE_TEXT("ICON_COMPOSITOR=MANUAL_EXACT_F81F");
     TRACE_TEXT("ICON_CACHE_DISABLED=1");

@@ -77,6 +77,10 @@ def decode_lui_addiu_address(lui: int, addiu: int) -> int:
     return (((lui & 0xFFFF) << 16) + immediate) & 0xFFFFFFFF
 
 
+def code_address_valid(address: int) -> bool:
+    return LOAD_BASE <= address < 0x80500000 and address & 3 == 0
+
+
 def validate_cache_barrier(data: bytes, address: int) -> bool:
     expected = (
         0x3C048000,
@@ -114,6 +118,30 @@ def validate_tail(data: bytes, return_address: int) -> int | None:
         return None
     target = decode_direct_jump_target(call_site, call)
     return target if validate_cache_barrier(data, target) else None
+
+
+def decode_resume_timer(
+    data: bytes, return_address: int
+) -> tuple[int, int] | None:
+    call_site = return_address + 0x84
+    call = word_at_va(data, call_site)
+    delay = word_at_va(data, return_address + 0x88)
+    if (
+        word_at_va(data, return_address + 0x80) != 0x24050001
+        or call is None
+        or call >> 26 != 3
+        or delay is None
+        or delay & 0xFFFF0000 != 0x24060000
+    ):
+        return None
+    target = decode_direct_jump_target(call_site, call)
+    if (
+        not code_address_valid(target)
+        or word_at_va(data, target + 0x00) != 0x27BDFFD8
+        or word_at_va(data, target + 0x10) != 0x24050162
+    ):
+        return None
+    return target, delay & 0xFFFF
 
 
 def matches_common_prologue(data: bytes, entry: int) -> bool:
@@ -182,6 +210,71 @@ def decode_native_prelaunch(
     return pre_path_helper, pre_trace_helper, pre_trace_text
 
 
+def validate_native_caller(data: bytes, caller_return: int) -> bool:
+    """Validate the complete 0x160-byte menu caller used by the handoff.
+
+    V44-V46 only recognized the instructions immediately surrounding the
+    path-loader call. V47 patches the saved return of this complete caller, so
+    both its prologue/epilogue and its post-BDA path must be exact.
+    """
+    caller_entry = caller_return - 0x220
+    frame_checks = {
+        0x00: 0x27BDFEA0,
+        0x04: 0xAFB40158,
+        0x1C: 0xAFB30154,
+        0x20: 0xAFB20150,
+        0x24: 0xAFB1014C,
+        0x28: 0xAFB00148,
+        0x2C: 0xAFBF015C,
+        0x58: 0x8FBF015C,
+        0x5C: 0x8FB40158,
+        0x60: 0x8FB30154,
+        0x64: 0x8FB20150,
+        0x68: 0x8FB1014C,
+        0x6C: 0x8FB00148,
+        0x70: 0x03E00008,
+        0x74: 0x27BD0160,
+    }
+    if any(
+        word_at_va(data, caller_entry + delta) != expected
+        for delta, expected in frame_checks.items()
+    ):
+        return False
+
+    prelaunch = decode_native_prelaunch(data, caller_return)
+    post_trace_call = word_at_va(data, caller_return + 0x04)
+    post_path_call = word_at_va(data, caller_return + 0x0C)
+    epilogue_jump = word_at_va(data, caller_return + 0x14)
+    if (
+        prelaunch is None
+        or post_trace_call is None
+        or post_trace_call >> 26 != 3
+        or post_path_call is None
+        or post_path_call >> 26 != 3
+        or word_at_va(data, caller_return + 0x10) != 0x27A40020
+        or epilogue_jump is None
+        or epilogue_jump >> 26 != 2
+        or word_at_va(data, caller_return + 0x18) != 0x8FBF015C
+    ):
+        return False
+
+    pre_path_helper = prelaunch[0]
+    post_trace_helper = decode_direct_jump_target(
+        caller_return + 0x04, post_trace_call
+    )
+    post_path_helper = decode_direct_jump_target(
+        caller_return + 0x0C, post_path_call
+    )
+    epilogue = decode_direct_jump_target(
+        caller_return + 0x14, epilogue_jump
+    )
+    return (
+        code_address_valid(post_trace_helper)
+        and post_path_helper == pre_path_helper
+        and epilogue == caller_entry + 0x5C
+    )
+
+
 def find_native_caller_returns(data: bytes, path_entry: int) -> tuple[int, ...]:
     expected_jal = 0x0C000000 | ((path_entry >> 2) & 0x03FFFFFF)
     returns: list[int] = []
@@ -196,14 +289,13 @@ def find_native_caller_returns(data: bytes, path_entry: int) -> tuple[int, ...]:
             -0x0C: 0x02803021,  # move a2,s4
             -0x04: 0x27A40020,  # addiu a0,sp,0x20
             0x10: 0x27A40020,   # post-BDA helper uses the same path
-            -0x220: 0x27BDFEA0, # caller owns a 0x160-byte frame
         }
         if not all(
             word_at_va(data, caller_return + delta) == expected
             for delta, expected in checks.items()
         ):
             continue
-        if decode_native_prelaunch(data, caller_return) is None:
+        if not validate_native_caller(data, caller_return):
             continue
         returns.append(caller_return)
     return tuple(returns)
@@ -287,6 +379,14 @@ def inspect_firmware(path: Path) -> bool:
         print(f"  BDA return: 0x{match.return_address:08x}")
         print(f"  cache barrier: 0x{match.cache_barrier:08x}")
         print(f"  第三参数: {match.launch_a2}")
+        resume_timer = decode_resume_timer(image, match.return_address)
+        if resume_timer is None or resume_timer[1] != 0x190:
+            print("  GUI 恢复定时器: 未通过 400 ms 机器码校验")
+            return False
+        print(
+            "  GUI 恢复定时器: "
+            f"0x{resume_timer[0]:08x}, {resume_timer[1]} ms"
+        )
         print(
             "  原生 tail caller: "
             + (
@@ -309,6 +409,7 @@ def inspect_firmware(path: Path) -> bool:
                 )
         if not match.native_caller_returns:
             return False
+        print("  原生 caller 完整帧及 post-BDA 收尾: 已通过")
     return True
 
 

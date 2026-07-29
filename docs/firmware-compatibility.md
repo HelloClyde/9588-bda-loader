@@ -3,8 +3,9 @@
 BDA Loader 不依赖单一固定入口地址。启动目标 BDA 前，它会从当前 BDA 返回地址反推
 path-loader 入口，并验证完整的函数序言、参数保存、`0x81c00020` 装载、`jalr`、
 返回分支和 cache barrier；还会验证系统菜单调用者的 `0x160` 字节栈帧、`sp+0x20`
-路径区、两次原生前置调用与 `s3/s4` 参数布局。只有全部匹配才会写入不占 heap 的
-tail stub 并修改外层返回地址。
+路径区、原生 prelaunch、post-BDA helper、完整 epilogue 与 `s3/s4` 参数布局，以及
+BDA 返回后 GUI 恢复定时器的入口、命令号和 400 ms 参数。只有全部匹配才会修改
+完整菜单 caller 的保存父返回地址。
 
 ## 已分析的固件
 
@@ -40,9 +41,13 @@ python tools/verify_firmware_profiles.py `
 
 9688 首次真机验证后，请使用诊断版并保留 `A:\BDALOAD.LOG`。成功调度时应看到
 `FIRMWARE_PROFILE=9688-JZ4730` 或 `FIRMWARE_PROFILE=9688-JZ4740`，以及
-`DEFER_PREPARED`、`DEFER_COMMIT_AND_RETURN`；诊断版真正进入栈上启动 stub 后
-会先写入 `DEFER_TAIL_STUB_ENTER`，执行固件清理后的固定等待，再按系统菜单原顺序
-调用路径/运行时准备 helper、固件 trace helper 和 path-loader。
+`DEFER_PATCH_LEVEL=MENU_CALLER_RETURN`、`DEFER_PREPARED` 和
+`DEFER_COMMIT_AND_RETURN`；诊断版只有在第一层 path-loader 和完整菜单 caller 都
+执行完 post-BDA 收尾、恢复寄存器并弹出旧栈帧后，才会写入
+`DEFER_AFTER_CALLER_ENTER`。handoff 随后建立新的原生 caller 栈帧，固定等待
+600 ms，再从系统菜单原有 prelaunch tail 进入；固件自己调用堆状态 helper、
+trace helper、path-loader 和完整 post-BDA epilogue。共同等待长于五套固件均使用的
+400 ms GUI 恢复定时器，避免恢复事件尚未触发就再次停止定时器。
 
-正式版也会创建该文件，但只保留清理后的单行 `DEFER_TAIL_STUB_ENTER`，作为 PSX
-兼容 I/O 检查点；完整性能与地址字段仅由诊断版输出。
+正式版不会创建或写入 `BDALOAD.LOG`；诊断版才输出完整性能与地址字段。两者使用
+相同的固件定时窗口，启动兼容性不再依赖诊断日志产生的随机延时。

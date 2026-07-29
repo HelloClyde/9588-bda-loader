@@ -160,15 +160,18 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 另一个 BDA。当前实现会：
 
 1. 校验正在执行的固件 path-loader profile；
-2. 校验系统菜单调用点的 `0x160` 字节栈帧布局；
-3. 把目标路径和带 post-cleanup gate 的 tail stub 写入该固件栈帧的空闲区；
+2. 校验系统菜单 caller 的完整 `0x160` 字节栈帧、prelaunch 与 post-BDA 路径；
+3. 记录目标路径、原 caller 的父返回地址和固件上下文，不覆盖当前 caller 的路径区；
 4. 释放 Loader 的字体、图标、列表与绘图资源，保证目标启动时没有 Loader 堆块存活；
-5. 用固件 D-cache barrier 写回 stub，并把外层返回地址改为其 KSEG1 非缓存别名；
-6. 让 Loader 正常返回并完成第一层固件 path-loader 的 post-BDA 收尾；
-7. stub 统一等待 8 个固件 tick，再重放系统菜单原有的路径/运行时准备 helper 与
-   固件 trace helper；
-8. stub 按系统原调用点的 `a0/a1/a2` 和 `ra` 做 path-loader tail-call，目标返回后
-   直接回到原菜单。
+5. 用固件 D-cache barrier 写回状态，并把完整菜单 caller 的保存父返回地址改为
+   静态 handoff 的 KSEG1 非缓存别名；
+6. 让 Loader 正常返回；第一层 path-loader 先用 `0x190`（400 ms）恢复 GUI 定时器，
+   随后菜单 caller 继续执行 post-BDA trace、heap 检查、寄存器恢复并弹出旧栈帧；
+7. handoff 在旧 caller 完整结束后建立一份新的原生 `0x160` 字节 caller 栈帧，
+   保存原父返回地址、复制目标路径并恢复 `s3/s4` 启动上下文；
+8. handoff 等待 24 个固件 tick（600 ms），确保 GUI 恢复事件已触发；
+9. 跳入固件原有 caller 的 prelaunch tail，由固件自己执行前置 helper、path-loader、
+   post-BDA helper 和 epilogue；目标退出后沿原父返回地址回到菜单。
 
 这避免目标覆盖仍在执行的 Loader，也消除了保留 heap trampoline 对 PSX 等
 动态重编译器的内存地址、连续空间和 JIT 布局影响。
@@ -179,39 +182,45 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 看到类似字段：
 
 ```text
-BDALOAD TRACE V44
+BDALOAD TRACE V47
 TRACE_OUTPUT=2
-LAUNCH_STUB=FIRMWARE_CALLER_STACK_TAIL
-LAUNCH_GATE=FIRMWARE_PRELAUNCH_REPLAY
+LAUNCH_STUB=AFTER_COMPLETE_MENU_CALLER
+LAUNCH_GATE=FIRMWARE_CALLER_TAIL_REENTRY
+LAUNCH_SETTLE=FIRMWARE_TIMER_400MS_PLUS_MARGIN
 SYSTEM_FONT=RUNTIME_HZK_LIB
 SYSTEM_FONT_LOAD_RESULT=1
 FIRMWARE_PROFILE=9588-JZ4730
 LAUNCH_MODE=DEFER_AFTER_RETURN
 LAUNCH_CACHE_BARRIER=...
+PATHLOADER_RA=...
+MENU_CALLER_STACK=...
+MENU_PARENT_RA=...
 LAUNCH_PRE_PATH_HELPER=...
 LAUNCH_PRE_TRACE_HELPER=...
 LAUNCH_PRE_TRACE_TEXT=...
-DEFER_CALLER_PATH=...
-DEFER_TAIL_STUB=...
+LAUNCH_CALLER_PRE_ENTRY=...
+LAUNCH_CALLER_EPILOGUE=...
+DEFER_PATCH_LEVEL=MENU_CALLER_RETURN
+DEFER_FIRST_CALLER_COMPLETES=1
+DEFER_HANDOFF=...
 DEFER_HEAP_RETAINED=0
 DEFER_EXEC_MODE=KSEG1_UNCACHED
 DEFER_PREPARED
-DEFER_POST_CLEANUP_SETTLE_TICKS=8
+DEFER_POST_CLEANUP_SETTLE_TICKS=24
 DEFER_COMMIT_AND_RETURN
-DEFER_TAIL_STUB_ENTER
+DEFER_AFTER_CALLER_ENTER
 ```
 
-`DEFER_TAIL_STUB_ENTER` 由第一层固件 path-loader 完成清理、进入栈上 stub 后写入。
-日志写入后才开始固定等待，随后正式版和诊断版都会连续执行相同的两个固件前置
-helper 和 path-loader；前置 helper 的三个地址均从当前调用点解码并经过范围校验。
-缺少该行表示第一层固件尚未返回到启动 stub。复现死机后请先重启并复制日志，不要
-再次运行诊断版，以免覆盖现场。
+`DEFER_AFTER_CALLER_ENTER` 只有在第一层 path-loader 和完整菜单 caller 均已完成
+post-BDA 收尾并弹出旧栈帧后才会写入。随后正式版和诊断版都会等待 600 ms，再进入
+固件原有 caller tail。固件 timer、caller prologue/epilogue、前后 helper 与跳转目标
+均经过机器码布局校验。缺少该行表示第一层固件或菜单 caller 尚未完整返回。复现
+死机后请先重启并复制日志，不要再次运行诊断版，以免覆盖现场。
 
 正式版和诊断版会编译完全相同的诊断计时与启动代码，成品长度、函数地址、全局布局
 和栈帧一致。`TRACE_OUTPUT=2` 的诊断版写入完整日志；正式版的运行时开关为 `1`，
-只在启动时执行一次 create/truncate/close，并在第一层 path-loader 清理后写入一行
-`DEFER_TAIL_STUB_ENTER`。这两个低频兼容 I/O 检查点用于复现真机上 PSX 所需的固件
-状态，不会在扫描、绘制或触摸过程中频繁写盘。
+不会创建、截断或写入 `BDALOAD.LOG`。两个成品仅有该输出开关一个数据字节不同；
+目标启动不再依赖日志 I/O 偶然延长固件恢复窗口。
 
 ## CI 与发布
 
