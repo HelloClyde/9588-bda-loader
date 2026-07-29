@@ -160,16 +160,18 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 另一个 BDA。当前实现会：
 
 1. 校验正在执行的固件 path-loader profile；
-2. 在任何日志、字库或 GUI 分配前，首先预留一段小型 MIPS trampoline；
-3. 写入目标路径和指令后，先释放 Loader 的字体、图标与绘图资源；
-4. 等待固定 8 个固件 tick，让普通版和诊断版具有相同的最短收尾时间；
-5. 用固件 D-cache barrier 写回 trampoline，并把外层返回地址改为其 KSEG1 非缓存别名；
-6. 让 Loader 正常返回并完成固件 post-BDA 收尾；
-7. 再由 trampoline 从完整入口启动目标 BDA；
-8. 目标返回后 tail-call `MEM_FREE`，释放 trampoline 并回到原菜单 continuation。
+2. 校验系统菜单调用点的 `0x160` 字节栈帧布局；
+3. 把目标路径和带 post-cleanup gate 的 tail stub 写入该固件栈帧的空闲区；
+4. 释放 Loader 的字体、图标、列表与绘图资源，保证目标启动时没有 Loader 堆块存活；
+5. 用固件 D-cache barrier 写回 stub，并把外层返回地址改为其 KSEG1 非缓存别名；
+6. 让 Loader 正常返回并完成第一层固件 path-loader 的 post-BDA 收尾；
+7. stub 统一等待 8 个固件 tick，再重放系统菜单原有的路径/运行时准备 helper 与
+   固件 trace helper；
+8. stub 按系统原调用点的 `a0/a1/a2` 和 `ra` 做 path-loader tail-call，目标返回后
+   直接回到原菜单。
 
-这避免目标覆盖仍在执行的 Loader，也消除了诊断日志、堆复用和 I-cache
-状态对链式启动的影响；trampoline 会在目标返回后自行释放。
+这避免目标覆盖仍在执行的 Loader，也消除了保留 heap trampoline 对 PSX 等
+动态重编译器的内存地址、连续空间和 JIT 布局影响。
 
 ## 诊断日志
 
@@ -177,20 +179,39 @@ BDA 图标中的 RGB565 `0xf81f` 是显式透明色键，而固件整屏 VX 提�
 看到类似字段：
 
 ```text
-BDALOAD TRACE V37
-LAUNCH_BUFFER_PTR=...
+BDALOAD TRACE V44
+TRACE_OUTPUT=2
+LAUNCH_STUB=FIRMWARE_CALLER_STACK_TAIL
+LAUNCH_GATE=FIRMWARE_PRELAUNCH_REPLAY
 SYSTEM_FONT=RUNTIME_HZK_LIB
 SYSTEM_FONT_LOAD_RESULT=1
 FIRMWARE_PROFILE=9588-JZ4730
 LAUNCH_MODE=DEFER_AFTER_RETURN
 LAUNCH_CACHE_BARRIER=...
+LAUNCH_PRE_PATH_HELPER=...
+LAUNCH_PRE_TRACE_HELPER=...
+LAUNCH_PRE_TRACE_TEXT=...
+DEFER_CALLER_PATH=...
+DEFER_TAIL_STUB=...
+DEFER_HEAP_RETAINED=0
 DEFER_EXEC_MODE=KSEG1_UNCACHED
 DEFER_PREPARED
-DEFER_SETTLE_TICKS=8
+DEFER_POST_CLEANUP_SETTLE_TICKS=8
 DEFER_COMMIT_AND_RETURN
+DEFER_TAIL_STUB_ENTER
 ```
 
-复现死机后请先重启并复制日志，不要再次运行诊断版，以免覆盖现场。
+`DEFER_TAIL_STUB_ENTER` 由第一层固件 path-loader 完成清理、进入栈上 stub 后写入。
+日志写入后才开始固定等待，随后正式版和诊断版都会连续执行相同的两个固件前置
+helper 和 path-loader；前置 helper 的三个地址均从当前调用点解码并经过范围校验。
+缺少该行表示第一层固件尚未返回到启动 stub。复现死机后请先重启并复制日志，不要
+再次运行诊断版，以免覆盖现场。
+
+正式版和诊断版会编译完全相同的诊断计时与启动代码，成品长度、函数地址、全局布局
+和栈帧一致。`TRACE_OUTPUT=2` 的诊断版写入完整日志；正式版的运行时开关为 `1`，
+只在启动时执行一次 create/truncate/close，并在第一层 path-loader 清理后写入一行
+`DEFER_TAIL_STUB_ENTER`。这两个低频兼容 I/O 检查点用于复现真机上 PSX 所需的固件
+状态，不会在扫描、绘制或触摸过程中频繁写盘。
 
 ## CI 与发布
 

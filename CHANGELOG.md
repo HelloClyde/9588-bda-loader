@@ -4,6 +4,27 @@
 
 ## [未发布]
 
+## [1.2.2] - 2026-07-29
+
+- 启动交接改为固件菜单调用者栈上的 tail stub，目标运行期间不再保留
+  Loader heap trampoline。
+- 对 PSX dynarec 等高内存、堆执行应用恢复与系统菜单直启一致的堆布局和
+  `a0/a1/a2/ra` 调用形态。
+- 固件验证增加原生 caller frame、路径区和 tail-call 参数布局检查。
+- 固定 8 tick 等待从 Loader 内部移到 tail stub，在第一层固件 path-loader
+  完成 post-BDA 清理之后才开始计时，普通版和诊断版共用同一 gate。
+- 从当前固件的系统菜单调用点动态解码并重放路径/运行时准备 helper 与固件
+  trace helper，使延迟启动链和系统菜单直启保持同一前置状态。
+- 诊断日志移到固定等待和原生 helper 之前；正式版与诊断版进入 path-loader
+  前执行完全相同的最后两次固件调用，避免日志 I/O 再次掩盖状态差异。
+- 固件验证工具同步检查两次前置 `jal`、路径参数和 trace 字符串装载形态。
+- 正式版与诊断版统一编译诊断计时和代码路径，仅由一个运行时数据字节控制
+  `BDALOAD.LOG` 输出；两个 BDA 的大小、代码地址、全局布局和栈帧完全一致。
+- 真机一字节 A/B 测试确认 PSX 依赖固件文件写入/关闭的状态副作用，而非编译
+  布局；正式版因此仅保留启动时 create/truncate/close 和清理后单行 marker 两个
+  兼容 I/O 检查点，避免完整诊断版在列表操作期间频繁写盘。
+- 诊断版继续写入完整日志；二者成品除输出开关外仍只有一个字节不同。
+
 ## [1.2.1] - 2026-07-28
 
 - trampoline 改为 Loader 的第一次堆分配，诊断日志和系统字库不再改变其
@@ -38,7 +59,8 @@
 - 支持 9588 V3.30 的 JZ4720、JZ4730、JZ4740 三套固件布局。
 - 提供诊断构建、GitHub Actions 自动打包和 tag 自动发布。
 
-[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.1...HEAD
+[未发布]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/HelloClyde/9588-bda-loader/compare/v1.0.0...v1.1.0
